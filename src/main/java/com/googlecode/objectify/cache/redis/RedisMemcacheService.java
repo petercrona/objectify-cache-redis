@@ -16,6 +16,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * We store everything using java serialization. In theory we could be more efficient with some sort of custom
@@ -77,6 +79,21 @@ public class RedisMemcacheService implements MemcacheService {
 		}
 	}
 
+	private <T> void putValues(Function<T, RedisIdentifiableValue> mapFn, Set<Map.Entry<String, T>> entrySet) {
+		int n = entrySet.size();
+		byte[][] keyValuePairs = new byte[n * 2][];
+
+		int i = 0;
+		for (Map.Entry<String, T> entry : entrySet) {
+			keyValuePairs[i++] = entry.getKey().getBytes(StandardCharsets.UTF_8);
+			keyValuePairs[i++] = mapFn.apply(entry.getValue()).toRedisString();
+		}
+
+		try (final Jedis jedis = jedisPool.getResource()) {
+			jedis.mset(keyValuePairs);
+		}
+	}
+
 	@Override
 	public Object get(final String key) {
 		final RedisIdentifiableValue iv = getValue(key);
@@ -85,34 +102,29 @@ public class RedisMemcacheService implements MemcacheService {
 
 	@Override
 	public Map<String, IdentifiableValue> getIdentifiables(final Collection<String> keys) {
-		// Can't use streams because they don't allow nulls
-		//return keys.stream().collect(Collectors.toMap(Functions.identity(), this::getIdentifiable));
-		final Map<String, IdentifiableValue> result = new LinkedHashMap<>();
+		Map<String, IdentifiableValue> ivs = getAll(
+				x -> x == null
+						? new RedisIdentifiableValue(null)
+						: x,
+				keys
+		);
 
-		for (final String key : keys) {
-			final IdentifiableValue iv = getIdentifiable(key);
-			result.put(key, iv);
-		}
+		putValues(
+				e -> (RedisIdentifiableValue) e,
+				ivs.entrySet().stream()
+						.filter(e -> e.getValue().getValue() == null)
+						.collect(Collectors.toSet())
+		);
 
-		return result;
-	}
-
-	private IdentifiableValue getIdentifiable(final String key) {
-		final RedisIdentifiableValue foundIv = getValue(key);
-
-		if (foundIv != null)
-			return foundIv;
-
-		// Force a null value into the system
-		final RedisIdentifiableValue nullIv = new RedisIdentifiableValue(null);
-
-		putValue(key, nullIv);
-
-		return nullIv;
+		return ivs;
 	}
 
 	@Override
 	public Map<String, Object> getAll(final Collection<String> keys) {
+		return getAll(x -> x == null ? null : x.getValue(), keys);
+	}
+
+	private <T> Map<String, T> getAll(Function<RedisIdentifiableValue, T> mapFn, final Collection<String> keys) {
 		final byte[][] binKeys = keys.stream().map(key -> key.getBytes(StandardCharsets.UTF_8)).toArray(byte[][]::new);
 
 		final List<byte[]> fetched;
@@ -120,7 +132,7 @@ public class RedisMemcacheService implements MemcacheService {
 			fetched = jedis.mget(binKeys);
 		}
 
-		final Map<String, Object> result = new LinkedHashMap<>();
+		final Map<String, T> result = new LinkedHashMap<>();
 
 		final Iterator<String> keysIt = keys.iterator();
 		int index = 0;
@@ -128,9 +140,9 @@ public class RedisMemcacheService implements MemcacheService {
 			final String key = keysIt.next();
 			final byte[] value = fetched.get(index);
 
-			final RedisIdentifiableValue iv = RedisIdentifiableValue.fromRedisString(value);
+			final RedisIdentifiableValue iv = value == null ? null : RedisIdentifiableValue.fromRedisString(value);
 
-			result.put(key, iv.getValue());
+			result.put(key, mapFn.apply(iv));
 
 			index++;
 		}
@@ -184,19 +196,14 @@ public class RedisMemcacheService implements MemcacheService {
 
 	@Override
 	public void putAll(final Map<String, Object> values) {
-		values.forEach(this::put);
+		putValues(RedisIdentifiableValue::new, values.entrySet());
 	}
 
 	@Override
 	public void deleteAll(final Collection<String> keys) {
-		keys.forEach(this::delete);
-	}
-
-	private void delete(final String key) {
-		final byte[] binKey = key.getBytes(StandardCharsets.UTF_8);
-
+		final byte[][] binKeys = keys.stream().map(key -> key.getBytes(StandardCharsets.UTF_8)).toArray(byte[][]::new);
 		try (final Jedis jedis = jedisPool.getResource()) {
-			jedis.del(binKey);
+			jedis.del(binKeys);
 		}
 	}
 }

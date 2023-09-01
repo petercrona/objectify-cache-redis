@@ -10,9 +10,7 @@ import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
 
 import java.nio.charset.StandardCharsets;
-import java.util.Collections;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 
 import static com.google.common.truth.Truth.assertThat;
 
@@ -43,6 +41,25 @@ class RedisMemcacheServiceTest {
 	}
 
 	@Test
+	void getAllMissing() {
+		final Map<String, Object> result = service.getAll(Collections.singletonList("asdf"));
+		assertThat(result.get("asdf")).isNull();
+	}
+
+	@Test
+	void getAllExistingAndNullIfMissing() {
+		service.put("asdf", "foobar");
+		Collection<String> keys = new ArrayList<>();
+		keys.add("asdf");
+		keys.add("kalle");
+
+		final Map<String, Object> result = service.getAll(keys);
+
+		assertThat(result.get("asdf")).isEqualTo("foobar");
+		assertThat(result.get("kalle")).isNull();
+	}
+
+	@Test
 	void setAndGetNull() {
 		service.put("asdf", null);
 		final Object result = service.get("asdf");
@@ -62,6 +79,23 @@ class RedisMemcacheServiceTest {
 		service.deleteAll(Collections.singletonList("asdf"));
 		final Object result = service.get("asdf");
 		assertThat(result).isNull();
+	}
+
+	@Test
+	void deleteManyWorks() {
+		service.put("asdf", "value");
+		service.put("kalle", "value");
+
+		Collection<String> toDelete = new ArrayList<>();
+		toDelete.add("asdf");
+		toDelete.add("kalle");
+		toDelete.add("missing");
+
+		service.deleteAll(toDelete);
+
+		assertThat(service.get("asdf")).isNull();
+		assertThat(service.get("kalle")).isNull();
+		assertThat(service.get("missing")).isNull();
 	}
 
 	@Test
