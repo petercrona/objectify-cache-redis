@@ -11,6 +11,8 @@ import redis.clients.jedis.JedisPool;
 
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static com.google.common.truth.Truth.assertThat;
 
@@ -111,6 +113,44 @@ class RedisMemcacheServiceTest {
 	}
 
 	@Test
+	void simpleMultiGetAndPutIdentifiable() {
+		List<IdentifiableValue> ivs = IntStream.range(0, 10)
+				.mapToObj(i -> this.getIdentifiable(Integer.toString(i))).collect(Collectors.toList());
+		ivs.forEach(iv -> assertThat(iv.getValue()).isNull());
+
+		Map<String, CasPut> data = IntStream.range(0, 10).boxed().collect(Collectors.toMap(
+				i -> Integer.toString(i),
+				i -> new CasPut(ivs.get(i), "next" + i, 0)
+		));
+
+		Set<String> successes = service.putIfUntouched(data);
+
+		IntStream.range(0, 10).mapToObj(Integer::toString).forEach(i -> {
+			assertThat(successes.contains(i)).isTrue();
+			assertThat(service.get(i)).isEqualTo("next" + i);
+		});
+	}
+
+	@Test
+	void multiGetAndPutIdentifiableWithExpiration() {
+		List<IdentifiableValue> ivs = IntStream.range(0, 10)
+				.mapToObj(i -> this.getIdentifiable(Integer.toString(i))).collect(Collectors.toList());
+		ivs.forEach(iv -> assertThat(iv.getValue()).isNull());
+
+		Map<String, CasPut> data = IntStream.range(0, 10).boxed().collect(Collectors.toMap(
+				i -> Integer.toString(i),
+				i -> new CasPut(ivs.get(i), "next" + i, 1)
+		));
+
+		Set<String> successes = service.putIfUntouched(data);
+
+		IntStream.range(0, 10).mapToObj(Integer::toString).forEach(i -> {
+			assertThat(successes.contains(i)).isTrue();
+			assertThat(service.get(i)).isEqualTo("next" + i);
+		});
+	}
+
+	@Test
 	void getAndPutIdentifiableWithExpiration() throws Exception {
 		final IdentifiableValue iv = this.getIdentifiable("asdf");
 		assertThat(iv.getValue()).isNull();
@@ -140,7 +180,6 @@ class RedisMemcacheServiceTest {
 		final Object result = service.get("asdf");
 		assertThat(result).isEqualTo("somethingelse");
 	}
-
 
 	private IdentifiableValue getIdentifiable(final String key) {
 		final Map<String, IdentifiableValue> map = service.getIdentifiables(Collections.singletonList(key));

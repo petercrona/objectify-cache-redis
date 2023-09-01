@@ -6,6 +6,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.Pipeline;
+import redis.clients.jedis.Response;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -81,6 +83,11 @@ public class RedisMemcacheService implements MemcacheService {
 
 	private <T> void putValues(Function<T, RedisIdentifiableValue> mapFn, Set<Map.Entry<String, T>> entrySet) {
 		int n = entrySet.size();
+
+		if (n == 0) {
+			return;
+		}
+
 		byte[][] keyValuePairs = new byte[n * 2][];
 
 		int i = 0;
@@ -155,24 +162,31 @@ public class RedisMemcacheService implements MemcacheService {
 		putValue(key, new RedisIdentifiableValue(value));
 	}
 
-	@Override
 	public Set<String> putIfUntouched(final Map<String, CasPut> values) {
 		final Set<String> successes = new HashSet<>();
+		final Map<String, Response<Object>> responses = new HashMap<>();
 
-		values.forEach((key, cput) -> {
-			final RedisIdentifiableValue iv = (RedisIdentifiableValue)cput.getIv();
-			final byte[] lastVersion = iv.getVersionRedisString();
+		try (final Jedis jedis = jedisPool.getResource()) {
+			Pipeline pipeline = jedis.pipelined();
 
-			final byte[] binKey = key.getBytes(StandardCharsets.UTF_8);
-			final RedisIdentifiableValue nextIv = new RedisIdentifiableValue(cput.getNextToStore());
+			values.forEach((key, cput) -> {
+				final RedisIdentifiableValue iv = (RedisIdentifiableValue)cput.getIv();
+				final byte[] lastVersion = iv.getVersionRedisString();
 
-			try (final Jedis jedis = jedisPool.getResource()) {
-				final byte[] response = executePutScript(jedis, binKey, lastVersion, nextIv.toRedisString(), cput.getExpirationSeconds());
-				if (Arrays.equals(OK_BYTES, response)) {
+				final byte[] binKey = key.getBytes(StandardCharsets.UTF_8);
+				final RedisIdentifiableValue nextIv = new RedisIdentifiableValue(cput.getNextToStore());
+
+				responses.put(key, executePutScript(pipeline, binKey, lastVersion, nextIv.toRedisString(), cput.getExpirationSeconds()));
+			});
+
+			pipeline.close();
+
+			responses.forEach((key, val) -> {
+				if (Arrays.equals(OK_BYTES, (byte[]) val.get())) {
 					successes.add(key);
 				}
-			}
-		});
+			});
+		}
 
 		return successes;
 	}
@@ -181,16 +195,13 @@ public class RedisMemcacheService implements MemcacheService {
 
 	private static final byte[] PUT_SCRIPT_WITHOUT_EXPIRATION = "local value = redis.call('get', KEYS[1]); if (value:sub(1, 16) == KEYS[2]) then return redis.call('set', KEYS[1], KEYS[3]) end".getBytes(StandardCharsets.UTF_8);
 
-	/**
-	 * @param expiration if 0 or less, will not include an expiration
-	 */
-	private byte[] executePutScript(final Jedis jedis, final byte[] binKey, final byte[] lastVersion, final byte[] value, final int expiration) {
+	private Response<Object> executePutScript(final Pipeline pipeline, final byte[] binKey, final byte[] lastVersion, final byte[] value, final int expiration) {
 		if (expiration > 0) {
 			// Redis expects the number as a string
 			final byte[] exp = Integer.toString(expiration).getBytes(StandardCharsets.UTF_8);
-			return (byte[])jedis.eval(PUT_SCRIPT_WITH_EXPIRATION, 4, binKey, lastVersion, value, exp);
+			return pipeline.eval(PUT_SCRIPT_WITH_EXPIRATION, 4, binKey, lastVersion, value, exp);
 		} else {
-			return (byte[])jedis.eval(PUT_SCRIPT_WITHOUT_EXPIRATION, 3, binKey, lastVersion, value);
+			return pipeline.eval(PUT_SCRIPT_WITHOUT_EXPIRATION, 3, binKey, lastVersion, value);
 		}
 	}
 
